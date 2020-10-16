@@ -92,7 +92,6 @@ type SvelteRestProps = { [index: string]: any }
 type SvelteSlots = { [index: string]: any }
 type SvelteStore<T> = { subscribe: (run: (value: T) => any, invalidate?: any) => any }
 
-
 declare var process: NodeJS.Process & { browser: boolean }
 
 declare function __sveltets_ensureAnimation<U extends any[]>(animation: SvelteAnimation<U>, ...args: U): {};

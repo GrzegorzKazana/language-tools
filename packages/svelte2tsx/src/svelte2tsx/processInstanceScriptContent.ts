@@ -8,6 +8,7 @@ import {
 } from './utils/tsAst';
 import { ExportedNames } from './nodes/ExportedNames';
 import { ImplicitTopLevelNames } from './nodes/ImplicitTopLevelNames';
+import { ImplicitStoreValues } from './nodes/ImplicitStoreValues';
 import { ComponentEvents } from './nodes/ComponentEvents';
 import { Scope } from './utils/Scope';
 
@@ -29,9 +30,11 @@ type PendingStoreResolution<T> = {
 export function processInstanceScriptContent(
     str: MagicString,
     script: Node,
-    events: ComponentEvents
+    events: ComponentEvents,
+    implicitStoreValues: ImplicitStoreValues
 ): InstanceScriptProcessResult {
     const htmlx = str.original;
+
     const scriptContent = htmlx.substring(script.content.start, script.content.end);
     const tsAst = ts.createSourceFile(
         'component.ts.svelte',
@@ -123,6 +126,7 @@ export function processInstanceScriptContent(
     };
 
     const handleStore = (ident: ts.Node, parent: ts.Node) => {
+        const storename = ident.getText().slice(1); // drop the $
         // handle assign to
         // eslint-disable-next-line max-len
         if (
@@ -165,12 +169,11 @@ export function processInstanceScriptContent(
             parent.left == ident &&
             Object.keys(operators).find((x) => x === String(parent.operatorToken.kind))
         ) {
-            const storename = ident.getText().slice(1); // drop the $
             const operator = operators[parent.operatorToken.kind];
             str.overwrite(
                 parent.getStart() + astOffset,
                 str.original.indexOf('=', ident.end + astOffset) + 1,
-                `${storename}.set( __sveltets_store_get(${storename}) ${operator}`
+                `${storename}.set( $${storename} ${operator}`
             );
             str.appendLeft(parent.end + astOffset, ')');
             return;
@@ -190,11 +193,10 @@ export function processInstanceScriptContent(
             }
 
             if (simpleOperator) {
-                const storename = ident.getText().slice(1); // drop the $
                 str.overwrite(
                     parent.getStart() + astOffset,
                     parent.end + astOffset,
-                    `${storename}.set( __sveltets_store_get(${storename}) ${simpleOperator} 1)`
+                    `${storename}.set( $${storename} ${simpleOperator} 1)`
                 );
                 return;
             } else {
@@ -208,10 +210,12 @@ export function processInstanceScriptContent(
             }
         }
 
-        // we must be on the right or not part of assignment
+        // we change "$store" references into "(__sveltets_store_get(store), $store)"
+        // - in order to get ts errors if store is not assignable to SvelteStore
+        // - use $store variable defined above to get ts flow control
         const dollar = str.original.indexOf('$', ident.getStart() + astOffset);
-        str.overwrite(dollar, dollar + 1, '__sveltets_store_get(');
-        str.appendLeft(ident.end + astOffset, ')');
+        str.overwrite(dollar, dollar + 1, '(__sveltets_store_get(');
+        str.prependLeft(ident.end + astOffset, `), $${storename})`);
     };
 
     const resolveStore = (pending: PendingStoreResolution<ts.Node>) => {
@@ -226,6 +230,8 @@ export function processInstanceScriptContent(
         }
         //We haven't been resolved, we must be a store read/write, handle it.
         handleStore(node, parent);
+        const storename = node.getText().slice(1);
+        implicitStoreValues.addStoreAcess(storename);
     };
 
     const handleIdentifier = (ident: ts.Identifier, parent: ts.Node) => {
@@ -396,6 +402,7 @@ export function processInstanceScriptContent(
         if (ts.isVariableDeclaration(node)) {
             events.checkIfIsStringLiteralDeclaration(node);
             events.checkIfDeclarationInstantiatedEventDispatcher(node);
+            implicitStoreValues.addVariableDeclaration(node);
         }
 
         if (ts.isCallExpression(node)) {
@@ -415,6 +422,11 @@ export function processInstanceScriptContent(
         if (ts.isImportClause(node)) {
             isDeclaration = true;
             onLeaveCallbacks.push(() => (isDeclaration = false));
+            implicitStoreValues.addImportStatement(node);
+        }
+
+        if (ts.isImportSpecifier(node)) {
+            implicitStoreValues.addImportStatement(node);
         }
 
         //handle stores etc
@@ -456,6 +468,7 @@ export function processInstanceScriptContent(
 
     // declare implicit reactive variables we found in the script
     implicitTopLevelNames.modifyCode(rootScope.declared, astOffset, str);
+    implicitStoreValues.modifyCode(astOffset, str);
 
     const firstImport = tsAst.statements
         .filter(ts.isImportDeclaration)

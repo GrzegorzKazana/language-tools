@@ -4,6 +4,7 @@ import { ScopeStack, Scope } from '../utils/Scope';
 import { isObjectKey, isMember } from '../../utils/svelteAst';
 
 export function handleStore(node: Node, parent: Node, str: MagicString): void {
+    const storename = node.name.slice(1);
     //handle assign to
     if (parent.type == 'AssignmentExpression' && parent.left == node && parent.operator == '=') {
         const dollar = str.original.indexOf('$', node.start);
@@ -20,12 +21,11 @@ export function handleStore(node: Node, parent: Node, str: MagicString): void {
         parent.left == node &&
         operators.includes(parent.operator)
     ) {
-        const storename = node.name.slice(1); // drop the $
         const operator = parent.operator.substring(0, parent.operator.length - 1); // drop the = sign
         str.overwrite(
             parent.start,
             str.original.indexOf('=', node.end) + 1,
-            `${storename}.set( __sveltets_store_get(${storename}) ${operator}`
+            `${storename}.set( $${storename} ${operator}`
         );
         str.appendLeft(parent.end, ')');
         return;
@@ -36,11 +36,10 @@ export function handleStore(node: Node, parent: Node, str: MagicString): void {
         if (parent.operator === '++') simpleOperator = '+';
         if (parent.operator === '--') simpleOperator = '-';
         if (simpleOperator) {
-            const storename = node.name.slice(1); // drop the $
             str.overwrite(
                 parent.start,
                 parent.end,
-                `${storename}.set( __sveltets_store_get(${storename}) ${simpleOperator} 1)`
+                `${storename}.set( $${storename} ${simpleOperator} 1)`
             );
         } else {
             console.warn(
@@ -54,10 +53,12 @@ export function handleStore(node: Node, parent: Node, str: MagicString): void {
         return;
     }
 
-    //rewrite get
+    // we change "$store" references into "(__sveltets_store_get(store), $store)"
+    // - in order to get ts errors if store is not assignable to SvelteStore
+    // - use $store variable defined above to get ts flow control
     const dollar = str.original.indexOf('$', node.start);
-    str.overwrite(dollar, dollar + 1, '__sveltets_store_get(');
-    str.prependLeft(node.end, ')');
+    str.overwrite(dollar, dollar + 1, '(__sveltets_store_get(');
+    str.prependLeft(node.end, `), $${storename})`);
 }
 
 type PendingStoreResolution<T> = {
@@ -99,19 +100,22 @@ export class Stores {
         }
     }
 
-    resolveStores(): void {
-        this.pendingStoreResolutions.forEach((pending) => {
-            let { node, parent, scope } = pending;
+    resolveStores(): string[] {
+        const unresolvedStores = this.pendingStoreResolutions.filter(({ node, scope }) => {
             const name = node.name;
             while (scope) {
                 if (scope.declared.has(name)) {
                     //we were manually declared, this isn't a store access.
-                    return;
+                    return false;
                 }
                 scope = scope.parent;
             }
             //We haven't been resolved, we must be a store read/write, handle it.
-            handleStore(node, parent, this.str);
+            return true;
         });
+
+        unresolvedStores.forEach(({ node, parent }) => handleStore(node, parent, this.str));
+
+        return unresolvedStores.map(({ node }) => node.name.slice(1));
     }
 }
