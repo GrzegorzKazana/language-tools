@@ -45,7 +45,7 @@ export class DiagnosticsProviderImpl implements DiagnosticsProvider {
             }))
             .map((diagnostic) => mapObjWithRangeToOriginal(fragment, diagnostic))
             .filter(hasNoNegativeLines)
-            .filter(isNoFalsePositive(document.getText(), tsDoc))
+            .filter(isNoFalsePositive(document.getText(), tsDoc, diagnostics))
             .map(enhanceIfNecessary);
     }
 
@@ -74,12 +74,17 @@ function hasNoNegativeLines(diagnostic: Diagnostic): boolean {
     return diagnostic.range.start.line >= 0 && diagnostic.range.end.line >= 0;
 }
 
-function isNoFalsePositive(text: string, tsDoc: SvelteDocumentSnapshot) {
-    return (diagnostic: Diagnostic) => {
+function isNoFalsePositive(
+    text: string,
+    tsDoc: SvelteDocumentSnapshot,
+    rawTsDiagnostics: ts.Diagnostic[]
+) {
+    return (diagnostic: Diagnostic, idx: number) => {
         return (
             isNoJsxCannotHaveMultipleAttrsError(diagnostic) &&
             isNoUnusedLabelWarningForReactiveStatement(diagnostic) &&
-            isNoUsedBeforeAssigned(diagnostic, text, tsDoc)
+            isNoUsedBeforeAssigned(diagnostic, text, tsDoc) &&
+            isNotHiddenStoreValueDeclaration(diagnostic, tsDoc, rawTsDiagnostics[idx])
         );
     };
 }
@@ -120,6 +125,25 @@ function isNoJsxCannotHaveMultipleAttrsError(diagnostic: Diagnostic) {
 }
 
 /**
+ * During compilation to tsx, for each store we create additional variable
+ * called `$<store-name>` which contains store value.
+ * This variable declaration does not show up in the sourcemaps.
+ * We have to ignore error if the variable prefixed by `$` was not a store.
+ */
+function isNotHiddenStoreValueDeclaration(
+    diagnostic: Diagnostic,
+    tsDoc: SvelteDocumentSnapshot,
+    rawTsDiagnostic: ts.Diagnostic
+): boolean {
+    if (diagnostic.code !== 2345 || !rawTsDiagnostic.start) return true;
+
+    const affectedLine = tsDoc.getLineContainingOffset(rawTsDiagnostic.start);
+    const hasStoreValueDefinition = /let \$.+ = __sveltets_store_get\(/.test(affectedLine);
+
+    return !hasStoreValueDefinition;
+}
+
+/**
  * Some diagnostics have JSX-specific nomenclature. Enhance them for more clarity.
  */
 function enhanceIfNecessary(diagnostic: Diagnostic): Diagnostic {
@@ -129,7 +153,7 @@ function enhanceIfNecessary(diagnostic: Diagnostic): Diagnostic {
             message:
                 'Type definitions are missing for this Svelte Component. ' +
                 // eslint-disable-next-line max-len
-                'It needs a class definition with at least the property \'$$prop_def\' which should contain a map of input property definitions.\n' +
+                "It needs a class definition with at least the property '$$prop_def' which should contain a map of input property definitions.\n" +
                 'Example:\n' +
                 'class ComponentName { $$prop_def: { propertyName: string; } }\n\n' +
                 diagnostic.message
