@@ -11,6 +11,7 @@ import { ImplicitTopLevelNames } from './nodes/ImplicitTopLevelNames';
 import { ImplicitStoreValues } from './nodes/ImplicitStoreValues';
 import { ComponentEvents } from './nodes/ComponentEvents';
 import { Scope } from './utils/Scope';
+import { getDirectTopMostAccessExpression } from './utils/getDirectTopMostAccessExpression';
 
 export interface InstanceScriptProcessResult {
     exportedNames: ExportedNames;
@@ -213,9 +214,23 @@ export function processInstanceScriptContent(
         // we change "$store" references into "(__sveltets_store_get(store), $store)"
         // - in order to get ts errors if store is not assignable to SvelteStore
         // - use $store variable defined above to get ts flow control
+        //
+        // for nested property access i.e. $store.prop.other
+        // we need to change to (__sveltets_store_get(store), $store.prop.other)
+        const topMostAccessExpression = getDirectTopMostAccessExpression(parent);
         const dollar = str.original.indexOf('$', ident.getStart() + astOffset);
         str.overwrite(dollar, dollar + 1, '(__sveltets_store_get(');
-        str.prependLeft(ident.end + astOffset, `), $${storename})`);
+
+        if (topMostAccessExpression) {
+            const wholeAccessExpression = str.original.substring(
+                topMostAccessExpression.getStart() + astOffset,
+                topMostAccessExpression.getEnd() + astOffset
+            );
+            str.prependLeft(ident.end + astOffset, `), ${wholeAccessExpression})`);
+            str.overwrite(ident.end + astOffset, topMostAccessExpression.getEnd() + astOffset, '');
+        } else {
+            str.prependLeft(ident.end + astOffset, `), $${storename})`);
+        }
     };
 
     const resolveStore = (pending: PendingStoreResolution<ts.Node>) => {

@@ -80,11 +80,16 @@ function processSvelteTemplate(str: MagicString): TemplateProcessResult {
     //track if we are in a declaration scope
     const isDeclaration = { value: false };
 
+    //keep track of topmost access expression, required
+    //for access to nested store value properties ($store.prop.other or $store['prop']['other'])
+    //where parent node is not enough
+    const currentStoreAccessExpression = { current: null as Node | null };
+
     //track $store variables since we are only supposed to give top level scopes special treatment, and users can declare $blah variables at higher scopes
     //which prevents us just changing all instances of Identity that start with $
 
     const scopeStack = new ScopeStack();
-    const stores = new Stores(scopeStack, str, isDeclaration);
+    const stores = new Stores(scopeStack, str, isDeclaration, currentStoreAccessExpression);
     const scripts = new Scripts(htmlxAst);
 
     const handleIdentifier = (node: Node) => {
@@ -212,6 +217,16 @@ function processSvelteTemplate(str: MagicString): TemplateProcessResult {
             case 'InlineComponent':
                 handleComponentLet(node);
                 break;
+            case 'MemberExpression':
+                if (
+                    !currentStoreAccessExpression.current &&
+                    node.object.type === 'Identifier' &&
+                    node.object.name[0] === '$' &&
+                    !scopeStack.current.hasDefined(node.object.name)
+                ) {
+                    currentStoreAccessExpression.current = node;
+                }
+                break;
         }
     };
 
@@ -248,6 +263,15 @@ function processSvelteTemplate(str: MagicString): TemplateProcessResult {
                 break;
             case 'InlineComponent':
                 onTemplateScopeLeave();
+                break;
+            case 'MemberExpression':
+                if (
+                    node.object.type === 'Identifier' &&
+                    node.object.name[0] === '$' &&
+                    !scopeStack.current.hasDefined(node.object.name)
+                ) {
+                    currentStoreAccessExpression.current = null;
+                }
                 break;
         }
     };

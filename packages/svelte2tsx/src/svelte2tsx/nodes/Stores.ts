@@ -3,7 +3,12 @@ import { Node } from 'estree-walker';
 import { ScopeStack, Scope } from '../utils/Scope';
 import { isObjectKey, isMember } from '../../utils/svelteAst';
 
-export function handleStore(node: Node, parent: Node, str: MagicString): void {
+export function handleStore(
+    node: Node,
+    parent: Node,
+    str: MagicString,
+    topMostMemberExpression: Node | null
+): void {
     const storename = node.name.slice(1);
     //handle assign to
     if (parent.type == 'AssignmentExpression' && parent.left == node && parent.operator == '=') {
@@ -56,15 +61,31 @@ export function handleStore(node: Node, parent: Node, str: MagicString): void {
     // we change "$store" references into "(__sveltets_store_get(store), $store)"
     // - in order to get ts errors if store is not assignable to SvelteStore
     // - use $store variable defined above to get ts flow control
+    //
+    // for nested property access i.e. $store.prop.other
+    // we need to change to (__sveltets_store_get(store), $store.prop.other)
     const dollar = str.original.indexOf('$', node.start);
     str.overwrite(dollar, dollar + 1, '(__sveltets_store_get(');
-    str.prependLeft(node.end, `), $${storename})`);
+
+    if (topMostMemberExpression) {
+        const wholeAccessExpression = str.original.substring(
+            topMostMemberExpression.start,
+            topMostMemberExpression.end
+        );
+        str.prependLeft(node.end, `), ${wholeAccessExpression})`);
+        // property access i.e. .prop.other was moved inside the parenthesis
+        // remove duplicate outside of it
+        str.overwrite(node.end, topMostMemberExpression.end, '');
+    } else {
+        str.prependLeft(node.end, `), $${storename})`);
+    }
 }
 
 type PendingStoreResolution<T> = {
     node: T;
     parent: T;
     scope: Scope;
+    topMostMemberExpression: Node | null;
 };
 
 const reservedNames = new Set(['$$props', '$$restProps', '$$slots']);
@@ -75,7 +96,8 @@ export class Stores {
     constructor(
         private scope: ScopeStack,
         private str: MagicString,
-        private isDeclaration: { value: boolean }
+        private isDeclaration: { value: boolean },
+        private currentAccessExpression: { current: Node | null }
     ) {}
 
     handleIdentifier(node: Node, parent: Node, prop: string): void {
@@ -96,25 +118,27 @@ export class Stores {
             if (isObjectKey(parent, prop)) {
                 return;
             }
-            this.pendingStoreResolutions.push({ node, parent, scope: this.scope.current });
+            this.pendingStoreResolutions.push({
+                node,
+                parent,
+                scope: this.scope.current,
+                topMostMemberExpression: this.currentAccessExpression.current
+            });
         }
     }
 
     resolveStores(): string[] {
         const unresolvedStores = this.pendingStoreResolutions.filter(({ node, scope }) => {
             const name = node.name;
-            while (scope) {
-                if (scope.declared.has(name)) {
-                    //we were manually declared, this isn't a store access.
-                    return false;
-                }
-                scope = scope.parent;
-            }
-            //We haven't been resolved, we must be a store read/write, handle it.
-            return true;
+
+            //if variable starting with '$' was manually declared by the user,
+            // this isn't a store access.
+            return !scope.hasDefined(name);
         });
 
-        unresolvedStores.forEach(({ node, parent }) => handleStore(node, parent, this.str));
+        unresolvedStores.forEach(({ node, parent, topMostMemberExpression }) =>
+            handleStore(node, parent, this.str, topMostMemberExpression)
+        );
 
         return unresolvedStores.map(({ node }) => node.name.slice(1));
     }
